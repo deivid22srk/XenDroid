@@ -65,6 +65,7 @@ private sealed interface Editing {
     data class Rename(val entry: ProfileEntry) : Editing
 }
 
+@OptIn(ExperimentalMaterial3Api::class)
 @Composable
 fun ProfilesScreen(
     vm: ProfileManagerViewModel,

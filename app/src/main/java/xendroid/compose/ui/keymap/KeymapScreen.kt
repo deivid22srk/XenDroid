@@ -36,7 +36,6 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.focus.FocusRequester
 import androidx.compose.ui.focus.focusRequester
-import androidx.compose.ui.input.key.KeyEventType
 import androidx.compose.ui.input.key.onKeyEvent
 import androidx.compose.ui.unit.dp
 import androidx.lifecycle.compose.collectAsStateWithLifecycle
@@ -122,7 +121,7 @@ private fun KeyCaptureDialog(label: String, onKey: (Int) -> Unit, onDismiss: () 
                     .focusRequester(focus)
                     .focusable()
                     .onKeyEvent { ev ->
-                        if (ev.type == KeyEventType.KeyDown) {
+                        if (ev.nativeKeyEvent.action == AndroidKeyEvent.ACTION_DOWN) {
                             onKey(ev.nativeKeyEvent.keyCode); true
                         } else false
                     }

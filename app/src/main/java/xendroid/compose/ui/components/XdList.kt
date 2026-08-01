@@ -34,7 +34,7 @@ fun LeadingIconContainer(
 ) {
     Surface(
         modifier = modifier.size(size.dp),
-        shape = RoundedCornerShape(size / 2.dp),
+        shape = RoundedCornerShape((size / 2).dp),
         color = container,
     ) {
         Row(
