@@ -10,6 +10,7 @@
 #ifndef XENIA_CPU_BACKEND_A64_A64_CODE_CACHE_H_
 #define XENIA_CPU_BACKEND_A64_A64_CODE_CACHE_H_
 
+#include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <mutex>
@@ -55,6 +56,9 @@ class A64CodeCache : public CodeCacheBase<A64CodeCache> {
   std::mutex perf_map_mutex_;
   FILE* perf_map_file_ = nullptr;
   bool perf_map_open_failed_ = false;
+  // Entries written since the last flush; used to batch fflush so one
+  // write() per placed function doesn't stall the JIT thread.
+  uint32_t perf_map_entries_ = 0;
 };
 
 }  // namespace a64
