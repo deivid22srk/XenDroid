@@ -38,6 +38,10 @@ namespace cpu {
 namespace backend {
 namespace a64 {
 
+// Flush the perf map after this many entries instead of after every entry, so
+// the JIT thread doesn't pay one write() syscall per placed function.
+static constexpr uint32_t kPerfMapFlushBatch = 512;
+
 A64CodeCache::~A64CodeCache() {
   if (perf_map_file_) {
     std::fclose(perf_map_file_);
@@ -97,7 +101,15 @@ void A64CodeCache::OnCodePlaced(uint32_t guest_address,
     std::fprintf(perf_map_file_, "0x%" PRIx64 " 0x%zx a64_host_code\n",
                  address, code_size);
   }
-  std::fflush(perf_map_file_);
+  // Batch flushes: an fflush (write syscall) per placed function stalls the
+  // JIT thread that compiles it, and games place thousands of functions
+  // during a session. simpleperf polls the map file, so a bounded batch is
+  // as good as a per-entry flush for live attribution; fclose at teardown
+  // flushes whatever is still buffered.
+  if (++perf_map_entries_ >= kPerfMapFlushBatch) {
+    std::fflush(perf_map_file_);
+    perf_map_entries_ = 0;
+  }
 #endif
 }
 
