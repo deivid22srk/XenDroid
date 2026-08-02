@@ -52,6 +52,9 @@ AAudioAudioDriver::AAudioAudioDriver(Memory* memory,
     frame_channels_ = AudioDriver::kFrameChannelsDefault;
   } else if (frame_channels_ != 1 && frame_channels_ != 2 &&
              frame_channels_ != 6) {
+    XELOGW(
+        "AAudio: unsupported XMP channel count {}; treating source as stereo",
+        frame_channels_);
     frame_channels_ = 2;
   }
   source_block_frames_ = block_samples_ / frame_channels_;
@@ -308,6 +311,11 @@ aaudio_data_callback_result_t AAudioAudioDriver::XmpAudioCallback(
     done += n;
     drain_remaining_ -= n;
     if (drain_remaining_ == 0) {
+      // A whole block was consumed: pace the producer once per block, not once
+      // per callback. A stereo block covers three 256-frame callbacks, so a
+      // per-callback release would let the producer submit three blocks for
+      // every one drained and pre-buffer the whole song.
+      semaphore_->Release(1, nullptr);
       std::unique_lock<std::mutex> guard(frames_mutex_);
       frames_unused_.push(drain_block_);
       drain_block_ = nullptr;
@@ -322,12 +330,16 @@ aaudio_data_callback_result_t AAudioAudioDriver::XmpAudioCallback(
   if (done == 0) {
     stat_gaps_.fetch_add(1, std::memory_order_relaxed);
     ConcealGap(output_buffer, out_samples, copy_samples);
+    // A gap means the queue drained, so wake the producer even though no block
+    // completed this callback.
+    semaphore_->Release(1, nullptr);
   } else {
     // Keep the unused tail of last_block_ at zero so a following gap callback
     // never repeats stale samples from a partial block.
-    if (done < block_frames) {
+    if (done < static_cast<int32_t>(output_block_frames_)) {
       std::memset(last_block_ + done * host_frame_channels_, 0,
-                  (block_frames - done) * host_frame_channels_ * sizeof(float));
+                  (output_block_frames_ - done) * host_frame_channels_ *
+                      sizeof(float));
     }
     ApplyGainAndClamp();
     ApplyFadeIn();
@@ -340,7 +352,6 @@ aaudio_data_callback_result_t AAudioAudioDriver::XmpAudioCallback(
     gap_blocks_ = 0;
   }
 
-  semaphore_->Release(1, nullptr);
   return AAUDIO_CALLBACK_RESULT_CONTINUE;
 }
 
@@ -462,7 +473,8 @@ void AAudioAudioDriver::LogAndResetStats() {
   const int32_t odd_frames =
       stat_unexpected_frames_.exchange(0, std::memory_order_relaxed);
   const uint64_t clipped = stat_clipped_.exchange(0, std::memory_order_relaxed);
-  const uint64_t played = (callbacks - gaps) * host_block_samples_;
+  const uint64_t played =
+      (callbacks - gaps) * output_block_frames_ * host_frame_channels_;
 
   int32_t xruns = -1;
   {
@@ -619,6 +631,9 @@ void AAudioAudioDriver::Shutdown() {
     frames_queued_.pop();
   }
 
+  // The drain cursor is callback-thread state; freeing it here is safe because
+  // AAudioStream_close() above blocks until the data callback returns and the
+  // recovery thread was joined before the stream was torn down.
   if (drain_block_) {
     delete[] drain_block_;
     drain_block_ = nullptr;
