@@ -10,6 +10,7 @@
 #ifndef XENIA_CPU_BACKEND_A64_A64_CODE_CACHE_H_
 #define XENIA_CPU_BACKEND_A64_A64_CODE_CACHE_H_
 
+#include <cstdint>
 #include <cstdio>
 #include <memory>
 #include <mutex>
