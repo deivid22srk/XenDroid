@@ -17,6 +17,7 @@ import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
+import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
@@ -41,21 +42,32 @@ fun SettingRow(host: SettingsHost, s: Setting, modified: Boolean, raw: String? =
 private fun titleColor(modified: Boolean) =
     if (modified) MaterialTheme.colorScheme.tertiary else MaterialTheme.colorScheme.onSurface
 
-/** Title block inside a row: title (tinted when modified) + description. */
+/** Title block inside a row: title (tinted when modified) + description. The
+ *  caller should give this [Modifier.weight] so long text reflows instead of
+ *  pushing the row's trailing control off-screen. */
 @Composable
-private fun RowTitle(text: String, modified: Boolean, desc: String = "") {
-    Column {
+private fun RowTitle(
+    text: String,
+    modified: Boolean,
+    desc: String = "",
+    modifier: Modifier = Modifier,
+) {
+    Column(modifier) {
         Text(
             text,
             color = titleColor(modified),
             style = MaterialTheme.typography.bodyLarge,
             fontWeight = FontWeight.Medium,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
         )
         if (desc.isNotEmpty()) {
             Text(
                 desc,
                 style = MaterialTheme.typography.bodySmall,
                 color = MaterialTheme.colorScheme.onSurfaceVariant,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
             )
         }
     }
@@ -68,6 +80,8 @@ private fun RowValue(value: String) {
         value,
         style = MaterialTheme.typography.labelLarge,
         color = MaterialTheme.colorScheme.primary,
+        maxLines = 1,
+        overflow = TextOverflow.Ellipsis,
         modifier = Modifier.padding(start = 12.dp),
     )
 }
@@ -83,8 +97,12 @@ private fun BoolRow(host: SettingsHost, s: Setting.Bool, modified: Boolean) {
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        RowTitle(s.title, modified, desc = s.desc)
-        Spacer(Modifier.weight(1f))
+        RowTitle(
+            s.title,
+            modified,
+            desc = s.desc,
+            modifier = Modifier.weight(1f).padding(end = 16.dp),
+        )
         Switch(
             checked = local,
             onCheckedChange = { local = it; host.onBoolChanged(s, it) },
@@ -113,8 +131,12 @@ private fun IntRow(host: SettingsHost, s: Setting.IntRange, modified: Boolean) {
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        RowTitle(s.title, modified, desc = s.desc)
-        Spacer(Modifier.weight(1f))
+        RowTitle(
+            s.title,
+            modified,
+            desc = s.desc,
+            modifier = Modifier.weight(1f).padding(end = 16.dp),
+        )
         RowValue(current.toString())
     }
     if (showDialog) {
@@ -163,8 +185,12 @@ private fun ListRow(host: SettingsHost, s: Setting.ListChoice, modified: Boolean
             .padding(horizontal = 16.dp, vertical = 12.dp),
         verticalAlignment = Alignment.CenterVertically,
     ) {
-        RowTitle(s.title, modified, desc = s.desc)
-        Spacer(Modifier.weight(1f))
+        RowTitle(
+            s.title,
+            modified,
+            desc = s.desc,
+            modifier = Modifier.weight(1f).padding(end = 16.dp),
+        )
         RowValue(currentLabel)
     }
     if (showDialog) {
@@ -323,10 +349,23 @@ private fun InheritedPreview(host: SettingsHost, s: Setting) {
             Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp),
             verticalAlignment = Alignment.CenterVertically,
         ) {
-            Column(Modifier.weight(1f)) {
-                Text(s.title, color = grey, style = MaterialTheme.typography.bodyLarge)
-                if (s.desc.isNotEmpty()) Text(s.desc, color = grey,
-                    style = MaterialTheme.typography.bodySmall)
+            Column(Modifier.weight(1f).padding(end = 16.dp)) {
+                Text(
+                    s.title,
+                    color = grey,
+                    style = MaterialTheme.typography.bodyLarge,
+                    maxLines = 2,
+                    overflow = TextOverflow.Ellipsis,
+                )
+                if (s.desc.isNotEmpty()) {
+                    Text(
+                        s.desc,
+                        color = grey,
+                        style = MaterialTheme.typography.bodySmall,
+                        maxLines = 3,
+                        overflow = TextOverflow.Ellipsis,
+                    )
+                }
             }
             Switch(checked = host.currentBool(s), onCheckedChange = null, enabled = false)
         }
@@ -345,8 +384,28 @@ private fun InheritedPreview(host: SettingsHost, s: Setting) {
 @Composable
 private fun InheritedTextRow(title: String, value: String, desc: String, grey: Color) {
     Column(Modifier.fillMaxWidth().padding(horizontal = 16.dp, vertical = 12.dp)) {
-        Text(title, color = grey, style = MaterialTheme.typography.bodyLarge)
-        if (desc.isNotEmpty()) Text(desc, color = grey, style = MaterialTheme.typography.bodySmall)
-        Text(value, color = grey, style = MaterialTheme.typography.bodySmall)
+        Text(
+            title,
+            color = grey,
+            style = MaterialTheme.typography.bodyLarge,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
+        if (desc.isNotEmpty()) {
+            Text(
+                desc,
+                color = grey,
+                style = MaterialTheme.typography.bodySmall,
+                maxLines = 3,
+                overflow = TextOverflow.Ellipsis,
+            )
+        }
+        Text(
+            value,
+            color = grey,
+            style = MaterialTheme.typography.bodySmall,
+            maxLines = 2,
+            overflow = TextOverflow.Ellipsis,
+        )
     }
 }
