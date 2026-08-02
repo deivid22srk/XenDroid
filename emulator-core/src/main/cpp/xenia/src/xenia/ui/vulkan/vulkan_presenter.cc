@@ -35,14 +35,16 @@
 // present mode selection logic.
 DEFINE_bool(
     vulkan_allow_present_mode_immediate, true,
-    "When available, allow the immediate presentation mode (1st priority), "
-    "offering the lowest latency with the possibility of tearing in certain "
-    "cases, and, depending on the configuration, variable refresh rate.",
+    "When available, allow the immediate presentation mode (1st priority on "
+    "desktop, 2nd on Android), offering the lowest latency with the "
+    "possibility of tearing in certain cases, and, depending on the "
+    "configuration, variable refresh rate.",
     "Vulkan");
 DEFINE_bool(
     vulkan_allow_present_mode_mailbox, true,
-    "When available, allow the mailbox presentation mode (2nd priority), "
-    "offering low latency without the possibility of tearing.",
+    "When available, allow the mailbox presentation mode (2nd priority on "
+    "desktop, 1st on Android), offering low latency without the possibility "
+    "of tearing.",
     "Vulkan");
 DEFINE_bool(
     vulkan_allow_present_mode_fifo_relaxed, true,
@@ -1295,6 +1297,17 @@ VkSwapchainKHR VulkanPresenter::PaintContext::CreateSwapchainForVulkanSurface(
   // interfering with GPU command processing, and also to allow tearing so
   // variable refresh rate may be used where it's available.
   // Note: If the priorities here are changes, update the cvar descriptions.
+#if XE_PLATFORM_xendroid
+  // On Android's fixed-refresh displays immediate presentation (no vsync)
+  // tears visibly, so prefer mailbox first: frame-dropping keeps latency low
+  // without tearing. The cvar still lets users allow immediate below.
+  if (cvars::vulkan_allow_present_mode_mailbox &&
+      std::find(present_modes.cbegin(), present_modes.cend(),
+                VK_PRESENT_MODE_MAILBOX_KHR) != present_modes.cend()) {
+    // Allowing dropping frames to reduce latency, but no tearing.
+    swapchain_create_info.presentMode = VK_PRESENT_MODE_MAILBOX_KHR;
+  } else
+#endif  // XE_PLATFORM_xendroid
   if (cvars::vulkan_allow_present_mode_immediate &&
       std::find(present_modes.cbegin(), present_modes.cend(),
                 VK_PRESENT_MODE_IMMEDIATE_KHR) != present_modes.cend()) {
