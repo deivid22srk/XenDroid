@@ -45,8 +45,8 @@ namespace xe {
             AudioDriver* AAudioAudioSystem::CreateDriver(xe::threading::Semaphore* semaphore,
                                       uint32_t frequency, uint32_t channels,
                                       bool need_format_conversion){
-                //FIXME
-                return new AAudioAudioDriver(memory_, semaphore);
+                return new AAudioAudioDriver(memory_, semaphore, frequency, channels,
+                                             need_format_conversion);
             }
         }
     }

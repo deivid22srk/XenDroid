@@ -27,7 +27,10 @@ namespace aaudio {
 
 class AAudioAudioDriver : public AudioDriver {
  public:
-  AAudioAudioDriver(Memory* memory, xe::threading::Semaphore* semaphore);
+  AAudioAudioDriver(Memory* memory, xe::threading::Semaphore* semaphore,
+                    uint32_t frequency = AudioDriver::kFrameFrequencyDefault,
+                    uint32_t channels = AudioDriver::kFrameChannelsDefault,
+                    bool need_format_conversion = true);
   ~AAudioAudioDriver() override;
 
   bool Initialize();
@@ -44,6 +47,10 @@ class AAudioAudioDriver : public AudioDriver {
       void* audioData,
       int32_t numFrames);
 
+  // Callback thread only. Entry point for the no-format-conversion path.
+  aaudio_data_callback_result_t XmpAudioCallback(void* audioData,
+                                                 int32_t numFrames);
+
   static void AudioErrorCallback(
       AAudioStream* stream,
       void* userdata,
@@ -52,6 +59,10 @@ class AAudioAudioDriver : public AudioDriver {
   // Callback thread only.
   void ConcealGap(float* output, int32_t out_samples, int32_t copy_samples);
   void ApplyFadeIn();
+  // XMP/no-conversion path: interleaved little-endian frames at the file's
+  // channel count are copied (or folded, for 5.1 sources) into last_block_.
+  // Callback thread only.
+  void CopyToLastBlock(float* out, const float* src, int32_t frames);
   // AAudio has no stream volume control, so this is done in software.
   // Callback thread only.
   void ApplyGainAndClamp();
@@ -83,18 +94,40 @@ class AAudioAudioDriver : public AudioDriver {
   bool recovery_quit_ = false;
   std::atomic<bool> shutting_down_{false};
 
-  static constexpr uint32_t host_frame_frequency_ = 48000;
   static constexpr uint32_t host_frame_channels_ = 2;
   static constexpr uint32_t channel_samples_ = 256;
-  static constexpr uint32_t x360_frame_samples_ = 6 * channel_samples_;
-  static constexpr uint32_t host_block_samples_ = host_frame_channels_ * channel_samples_;
+  static constexpr uint32_t block_samples_ = AudioDriver::kFrameSamplesMax;
+
+  // Source stream configuration. The main game render path submits guest
+  // 5.1 big-endian blocks (frequency 48000, channels 6, format conversion
+  // enabled); the XMP media player submits host little-endian interleaved
+  // floats at the file's own rate and channel count (conversion disabled).
+  uint32_t frame_frequency_ = AudioDriver::kFrameFrequencyDefault;
+  uint32_t frame_channels_ = AudioDriver::kFrameChannelsDefault;
+  bool need_format_conversion_ = true;
+  // Frames of frame_channels_ samples in each queued block: 256 for 5.1
+  // sources, 768 for stereo, 1536 for mono. Always block_samples_ /
+  // frame_channels_.
+  uint32_t source_block_frames_ = channel_samples_;
+  // Host-stereo frames produced per block; equals source_block_frames_.
+  uint32_t output_block_frames_ = channel_samples_;
+  uint32_t host_block_samples_ = host_frame_channels_ * channel_samples_;
+
   std::queue<float*> frames_queued_ = {};
   std::stack<float*> frames_unused_ = {};
   std::mutex frames_mutex_ = {};
 
+  // The no-conversion path drains a queued block across several callbacks, so
+  // it keeps a cursor instead of popping one block per callback. Callback
+  // thread only.
+  float* drain_block_ = nullptr;
+  int32_t drain_remaining_ = 0;
+
   // Underrun concealment: silence would put a step at both edges of every
   // gap, a ~187Hz click train at a 5.3ms block. Callback thread only.
-  float last_block_[host_block_samples_] = {};
+  // Sized for the largest output block: 1536 mono-source frames folded to
+  // stereo (3072 floats).
+  float last_block_[2 * block_samples_] = {};
   bool last_block_valid_ = false;
   uint32_t gap_blocks_ = 0;
 
