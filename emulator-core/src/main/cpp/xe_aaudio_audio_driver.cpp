@@ -39,8 +39,27 @@ namespace aaudio {
 static constexpr uint32_t kStatsIntervalMs = 1000;
 
 AAudioAudioDriver::AAudioAudioDriver(Memory* memory,
-                                     xe::threading::Semaphore* semaphore)
-    : semaphore_(semaphore) {}
+                                     xe::threading::Semaphore* semaphore,
+                                     uint32_t frequency, uint32_t channels,
+                                     bool need_format_conversion)
+    : semaphore_(semaphore),
+      frame_frequency_(frequency),
+      frame_channels_(channels),
+      need_format_conversion_(need_format_conversion) {
+  // Assertions are compiled out under NDEBUG, so sanitize channel counts here
+  // instead of relying on them: the cursor math divides by frame_channels_.
+  if (need_format_conversion_) {
+    frame_channels_ = AudioDriver::kFrameChannelsDefault;
+  } else if (frame_channels_ != 1 && frame_channels_ != 2 &&
+             frame_channels_ != 6) {
+    frame_channels_ = 2;
+  }
+  source_block_frames_ = block_samples_ / frame_channels_;
+  output_block_frames_ = source_block_frames_;
+  host_block_samples_ = host_frame_channels_ * source_block_frames_;
+  assert_true(!need_format_conversion_ || frame_channels_ == 6);
+  assert_true(block_samples_ % frame_channels_ == 0);
+}
 
 AAudioAudioDriver::~AAudioAudioDriver() {
   assert_true(frames_queued_.empty());
@@ -51,7 +70,7 @@ bool AAudioAudioDriver::Initialize() {
   {
     std::unique_lock<std::mutex> guard(frames_mutex_);
     for (int i = 0; i < 2; i++) {
-      float* buffer = new float[x360_frame_samples_];
+      float* buffer = new float[block_samples_];
       frames_unused_.push(buffer);
     }
   }
@@ -81,7 +100,7 @@ bool AAudioAudioDriver::BuildStream() {
     }
 
     AAudioStreamBuilder_setFormat(builder_, AAUDIO_FORMAT_PCM_FLOAT);
-    AAudioStreamBuilder_setSampleRate(builder_, host_frame_frequency_);
+    AAudioStreamBuilder_setSampleRate(builder_, frame_frequency_);
     AAudioStreamBuilder_setChannelCount(builder_, host_frame_channels_);
     AAudioStreamBuilder_setFramesPerDataCallback(builder_, channel_samples_);
     AAudioStreamBuilder_setDataCallback(builder_, AudioCallback, this);
@@ -167,6 +186,10 @@ aaudio_data_callback_result_t AAudioAudioDriver::AudioCallback(
   SCOPE_profile_cpu_f("apu");
 
   auto driver = static_cast<AAudioAudioDriver*>(userdata);
+  if (!driver->need_format_conversion_) {
+    return driver->XmpAudioCallback(audioData, numFrames);
+  }
+
   float* output_buffer = reinterpret_cast<float*>(audioData);
 
   // setFramesPerDataCallback is only a request, renegotiated on the
@@ -209,7 +232,6 @@ aaudio_data_callback_result_t AAudioAudioDriver::AudioCallback(
     return AAUDIO_CALLBACK_RESULT_CONTINUE;
   }
 
-
   conversion::sequential_6_BE_to_interleaved_2_LE(driver->last_block_, buffer,
                                                   channel_samples_);
   driver->ApplyGainAndClamp();
@@ -229,6 +251,126 @@ aaudio_data_callback_result_t AAudioAudioDriver::AudioCallback(
   driver->semaphore_->Release(1, nullptr);
 
   return AAUDIO_CALLBACK_RESULT_CONTINUE;
+}
+
+// XMP and other sources that already run in host endianness and channel count
+// submit interleaved little-endian floats here, one 1536-sample block at a
+// time. The stream is opened at the source's own rate and channel layout, so
+// this path only has to move samples; AAudio's mixer handles any device-side
+// resampling. A 5.1 source is folded to stereo with the same coefficients as
+// the conversion path, minus the byte swap.
+aaudio_data_callback_result_t AAudioAudioDriver::XmpAudioCallback(
+    void* audioData, int32_t numFrames) {
+  float* output_buffer = reinterpret_cast<float*>(audioData);
+
+  const int32_t block_frames =
+      std::min<int32_t>(numFrames, static_cast<int32_t>(output_block_frames_));
+  const int32_t out_samples = numFrames * host_frame_channels_;
+  const int32_t copy_samples = block_frames * host_frame_channels_;
+  if (numFrames != static_cast<int32_t>(channel_samples_)) {
+    stat_unexpected_frames_.store(numFrames, std::memory_order_relaxed);
+  }
+
+  stat_callbacks_.fetch_add(1, std::memory_order_relaxed);
+
+  if (drain_remaining_ == 0) {
+    std::unique_lock<std::mutex> guard(frames_mutex_);
+    const uint32_t depth = static_cast<uint32_t>(frames_queued_.size());
+    stat_queue_depth_sum_.fetch_add(depth, std::memory_order_relaxed);
+    if (depth > stat_queue_depth_max_.load(std::memory_order_relaxed)) {
+      stat_queue_depth_max_.store(depth, std::memory_order_relaxed);
+    }
+    if (!frames_queued_.empty()) {
+      drain_block_ = frames_queued_.front();
+      frames_queued_.pop();
+      drain_remaining_ = static_cast<int32_t>(source_block_frames_);
+    }
+  }
+
+  if (drain_remaining_ == 0) {
+    stat_gaps_.fetch_add(1, std::memory_order_relaxed);
+    ConcealGap(output_buffer, out_samples, copy_samples);
+    semaphore_->Release(1, nullptr);
+    return AAUDIO_CALLBACK_RESULT_CONTINUE;
+  }
+
+  // A queued block holds up to source_block_frames_ frames and spans several
+  // callbacks; drain it into last_block_, which keeps gain, fade-in and gap
+  // concealment working on the most recent host-stereo block.
+  int32_t done = 0;
+  while (done < block_frames && drain_remaining_ > 0) {
+    const int32_t n = std::min<int32_t>(block_frames - done, drain_remaining_);
+    const float* src =
+        drain_block_ +
+        (source_block_frames_ - static_cast<uint32_t>(drain_remaining_)) *
+            frame_channels_;
+    CopyToLastBlock(last_block_ + done * host_frame_channels_, src, n);
+    done += n;
+    drain_remaining_ -= n;
+    if (drain_remaining_ == 0) {
+      std::unique_lock<std::mutex> guard(frames_mutex_);
+      frames_unused_.push(drain_block_);
+      drain_block_ = nullptr;
+      if (!frames_queued_.empty()) {
+        drain_block_ = frames_queued_.front();
+        frames_queued_.pop();
+        drain_remaining_ = static_cast<int32_t>(source_block_frames_);
+      }
+    }
+  }
+
+  if (done == 0) {
+    stat_gaps_.fetch_add(1, std::memory_order_relaxed);
+    ConcealGap(output_buffer, out_samples, copy_samples);
+  } else {
+    // Keep the unused tail of last_block_ at zero so a following gap callback
+    // never repeats stale samples from a partial block.
+    if (done < block_frames) {
+      std::memset(last_block_ + done * host_frame_channels_, 0,
+                  (block_frames - done) * host_frame_channels_ * sizeof(float));
+    }
+    ApplyGainAndClamp();
+    ApplyFadeIn();
+    std::memcpy(output_buffer, last_block_, done * host_frame_channels_ * sizeof(float));
+    if (out_samples > done * host_frame_channels_) {
+      std::memset(output_buffer + done * host_frame_channels_, 0,
+                  (out_samples - done * host_frame_channels_) * sizeof(float));
+    }
+    last_block_valid_ = true;
+    gap_blocks_ = 0;
+  }
+
+  semaphore_->Release(1, nullptr);
+  return AAUDIO_CALLBACK_RESULT_CONTINUE;
+}
+
+void AAudioAudioDriver::CopyToLastBlock(float* out, const float* src,
+                                        int32_t frames) {
+  // Frames of source are already host little-endian floats at
+  // frame_channels_; no byte swap is involved.
+  if (frame_channels_ == 2) {
+    std::memcpy(out, src, frames * 2 * sizeof(float));
+    return;
+  }
+  if (frame_channels_ == 1) {
+    for (int32_t f = 0; f < frames; ++f) {
+      out[f * 2 + 0] = src[f];
+      out[f * 2 + 1] = src[f];
+    }
+    return;
+  }
+  // 5.1 -> stereo, same fold as conversion::sequential_6_BE_to_interleaved_2_LE
+  // without the byte swap.
+  for (int32_t f = 0; f < frames; ++f) {
+    const float fl = src[f * 6 + 0];
+    const float fr = src[f * 6 + 1];
+    const float fc = src[f * 6 + 2];
+    const float lfe = src[f * 6 + 3];
+    const float bl = src[f * 6 + 4];
+    const float br = src[f * 6 + 5];
+    out[f * 2 + 0] = fl + 0.707106781f * fc + 0.707106781f * bl + 0.5f * lfe;
+    out[f * 2 + 1] = fr + 0.707106781f * fc + 0.707106781f * br + 0.5f * lfe;
+  }
 }
 
 void AAudioAudioDriver::ConcealGap(float* output, int32_t out_samples,
@@ -422,14 +564,14 @@ void AAudioAudioDriver::SubmitFrame(float* samples) {
   {
     std::unique_lock<std::mutex> guard(frames_mutex_);
     if (frames_unused_.empty()) {
-      output_frame = new float[x360_frame_samples_];
+      output_frame = new float[block_samples_];
     } else {
       output_frame = frames_unused_.top();
       frames_unused_.pop();
     }
   }
 
-  std::memcpy(output_frame, samples, x360_frame_samples_ * sizeof(float));
+  std::memcpy(output_frame, samples, block_samples_ * sizeof(float));
 
   {
     std::unique_lock<std::mutex> guard(frames_mutex_);
@@ -475,6 +617,12 @@ void AAudioAudioDriver::Shutdown() {
   while (!frames_queued_.empty()) {
     delete[] frames_queued_.front();
     frames_queued_.pop();
+  }
+
+  if (drain_block_) {
+    delete[] drain_block_;
+    drain_block_ = nullptr;
+    drain_remaining_ = 0;
   }
 }
 
